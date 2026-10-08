@@ -52,7 +52,11 @@ export async function createApp({
     modelSettings ??
     new ModelSettingsService({
       createRuntime: () =>
-        ModelRuntime.create({ modelsStorePath: path.join(dataDir, 'models-store.json') }),
+        ModelRuntime.create({
+          modelsStorePath: path.join(dataDir, 'models-store.json'),
+          allowModelNetwork: true,
+          modelRefreshTimeoutMs: 5000,
+        }),
     });
   const availableModels = models ?? (() => settings.availableModels());
   const store = projects.composite;
