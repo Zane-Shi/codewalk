@@ -23,15 +23,12 @@ CodeWalk 是一个本地运行的 AI 源码阅读工具。导入项目后，它�
 ## 快速开始
 
 CodeWalk 需要 Node.js 24 或以上、npm、ripgrep 和 Dekko。当前支持 Dekko `map.json` v11。
+未安装 Node.js 时，请先从 [Node.js 官网](https://nodejs.org/)安装（包含 npm）。
 
 ### Linux
 
-先安装 [nvm](https://github.com/nvm-sh/nvm)，然后执行：
-
 ```bash
-# Node.js 与源码搜索工具
-nvm install 24
-nvm use 24
+# 源码搜索工具
 sudo apt-get update
 sudo apt-get install -y ripgrep
 
@@ -51,8 +48,7 @@ npm start
 ### Windows PowerShell
 
 ```powershell
-# Node.js、源码搜索工具和 uv
-winget install --id OpenJS.NodeJS.LTS --exact
+# 源码搜索工具和 uv
 winget install --id BurntSushi.ripgrep.MSVC --exact
 winget install --id astral-sh.uv --exact
 
