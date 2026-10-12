@@ -1,0 +1,45 @@
+{
+  "name": "pi-codewalk",
+  "version": "1.0.0",
+  "description": "Local read-only source learning and persistent AI annotations",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev:server": "node --watch --import tsx --use-env-proxy src/server.ts",
+    "build:web": "vite build",
+    "start": "npm run build:web && node --import tsx --use-env-proxy src/server.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "overrides": {
+    "dompurify": "3.4.16",
+    "fast-uri": "3.1.8",
+    "ip-address": "10.7.3"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.29.8",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@monaco-editor/react": "4.7.0",
+    "@tanstack/react-query": "5.102.8",
+    "cross-spawn": "7.0.6",
+    "monaco-editor": "0.56.0",
+    "pi-mcp-adapter": "2.32.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.3",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.5",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
+  }
+}
