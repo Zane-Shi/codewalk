@@ -130,6 +130,7 @@ export interface RouteModuleDelivery {
   order: number;
   title: string;
   narrative: RouteModuleNarrative;
+  teaching?: ModuleTeachingExplanation;
   blocks: RouteBlockDelivery[];
   incoming_relation_ids: string[];
   outgoing_relation_ids: string[];
@@ -242,11 +243,29 @@ export interface WorkspaceRouteCatalogRecord {
   updated_at: TimestampMs;
 }
 
-export interface RouteBlockTeachingContent extends RouteBlockNarrative {
+export interface RouteBlockTeachingContent extends Omit<RouteBlockNarrative, 'takeaways'> {
+  takeaways?: string[];
   block_id: RouteBlockId;
   walkthrough: BlockWalkthroughSection[];
   skip_guidance?: BlockSkipGuidance[];
   pseudocode?: string;
+  overview?: string;
+  sections?: FlexibleTeachingSection[];
+}
+
+/** Open semantic labels are authored by the teacher, not a business-specific enum. */
+export interface FlexibleTeachingSection {
+  kind: string;
+  title: string;
+  content: string;
+  source_ranges?: Array<{ start_line: number; end_line: number }>;
+  related_block_ids?: RouteBlockId[];
+}
+
+export interface ModuleTeachingExplanation {
+  overview: string;
+  block_flow: string;
+  sections?: FlexibleTeachingSection[];
 }
 
 export interface BlockWalkthroughSection {

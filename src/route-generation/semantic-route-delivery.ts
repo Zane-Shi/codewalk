@@ -31,6 +31,13 @@ function sourceRange(unit) {
 }
 
 function qualityFor(review, partialReason) {
+  if (partialReason && review?.status === 'accepted')
+    return {
+      level: 'partial',
+      review_id: review.id,
+      summary: partialReason,
+      issues: [{ category: 'teaching_incomplete', problem: partialReason }],
+    };
   if (review?.status === 'accepted')
     return {
       level: 'accepted',
@@ -60,11 +67,17 @@ export function assembleSemanticRouteDelivery({
   revision = 1,
   generated_at = Date.now(),
   partial_reason,
+  teaching,
 }) {
   if (!draft?.id || !draft?.snapshot_id || !Array.isArray(draft?.modules))
     throw new Error('语义路线草稿无效');
   if (review && (review.draft_id !== draft.id || review.draft_digest !== draft.decision_digest))
     throw new Error('语义审核与路线草稿版本不一致');
+  if (
+    teaching &&
+    (teaching.draft_id !== draft.id || teaching.draft_digest !== draft.decision_digest)
+  )
+    throw new Error('讲解与路线草稿版本不一致');
   const quality = qualityFor(review, partial_reason),
     status = quality.level === 'accepted' ? 'ready' : 'partial',
     revisionId = `rr_${digest({
@@ -73,28 +86,38 @@ export function assembleSemanticRouteDelivery({
       draft: draft.decision_digest,
       review: review?.id ?? null,
       quality,
+      teaching: teaching?.decision_digest ?? null,
     }).slice(0, 20)}`;
   let routeOrder = 0;
   const block_contents = [];
   const modules = draft.modules.map((module) => {
+    const moduleTeaching = teaching?.modules.find((item) => item.module_id === module.id);
     const first = module.steps[0],
       last = module.steps.at(-1),
       blocks = module.steps.map((step) => {
         const unit = step.source_unit,
-          explanation = {
-            block_id: step.id,
-            summary: step.explanation,
-            why_read: step.transition_from_previous ?? step.reading_guidance,
-            walkthrough: [
-              {
-                title: step.title,
-                start_line: unit.start_line,
-                end_line: unit.end_line,
-                explanation: step.reading_guidance,
-              },
-            ],
-            takeaways: [step.reading_guidance],
-          };
+          detailed = moduleTeaching?.blocks.find((item) => item.block_id === step.id)?.explanation,
+          explanation = detailed
+            ? {
+                ...structuredClone(detailed),
+                block_id: step.id,
+                summary: detailed.overview,
+                why_read: step.transition_from_previous ?? step.reading_guidance,
+              }
+            : {
+                block_id: step.id,
+                summary: step.explanation,
+                why_read: step.transition_from_previous ?? step.reading_guidance,
+                walkthrough: [
+                  {
+                    title: step.title,
+                    start_line: unit.start_line,
+                    end_line: unit.end_line,
+                    explanation: step.reading_guidance,
+                  },
+                ],
+                takeaways: [step.reading_guidance],
+              };
         block_contents.push({
           schema_version: '1',
           route_id,
@@ -139,6 +162,7 @@ export function assembleSemanticRouteDelivery({
         expected_outcome: last?.explanation ?? module.objective,
         takeaway: module.objective,
       },
+      ...(moduleTeaching ? { teaching: structuredClone(moduleTeaching.explanation) } : {}),
       blocks,
       incoming_relation_ids: [],
       outgoing_relation_ids: [],
@@ -197,6 +221,7 @@ export function publishSemanticRouteDelivery({
   route_id = draft.id,
   generated_at = Date.now(),
   partial_reason,
+  teaching,
 }) {
   if (!store?.db?.exec || !store?.put || !store?.list)
     throw new Error('语义路线发布需要支持事务的 Store');
@@ -215,6 +240,7 @@ export function publishSemanticRouteDelivery({
         revision,
         generated_at,
         partial_reason,
+        teaching,
       }),
       existing = findRecord(
         store,

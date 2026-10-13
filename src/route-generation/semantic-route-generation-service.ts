@@ -6,13 +6,16 @@ import { SemanticRouteDraftService } from './semantic-route-drafts.ts';
 import { SemanticRouteReviewService } from './semantic-route-review.ts';
 import { createPiSemanticRouteRunners } from './semantic-route-agent.ts';
 import { publishSemanticRouteDelivery } from './semantic-route-delivery.ts';
+import { SemanticRouteTeachingService } from './semantic-route-teaching.ts';
 
 const CHECKPOINT_KIND = 'semantic-route-generation';
-const CHECKPOINT_VERSION = 1;
+const CHECKPOINT_VERSION = 2;
 export const SEMANTIC_ROUTE_RECOVERY_LIMITS = Object.freeze({
   creator_attempts: 3,
   reviewer_attempts_per_draft: 2,
   total_agent_invocations: 8,
+  teaching_attempts_per_item: 2,
+  teaching_concurrency: 3,
 });
 
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -41,6 +44,14 @@ function initialCheckpoint({ workspace_id, route_id, snapshot, request }) {
     agent_invocations: 0,
     recovery_attempts: [],
     review_history: [],
+    teaching: {
+      draft_id: null,
+      module_ids: [],
+      block_ids: [],
+      revision_id: null,
+      agent_invocations: 0,
+      failures: [],
+    },
   };
 }
 
@@ -48,7 +59,7 @@ function loadCheckpoint(task, binding) {
   const expected = initialCheckpoint(binding),
     checkpoint = task?.checkpoint;
   if (!checkpoint) return expected;
-  if (checkpoint.kind !== CHECKPOINT_KIND || checkpoint.version !== CHECKPOINT_VERSION)
+  if (checkpoint.kind !== CHECKPOINT_KIND || ![1, CHECKPOINT_VERSION].includes(checkpoint.version))
     throw new Error('语义路线 checkpoint 格式无效');
   for (const key of ['workspace_id', 'route_id', 'snapshot_id', 'request_id', 'request_digest'])
     if (checkpoint[key] !== expected[key])
@@ -61,7 +72,30 @@ function loadCheckpoint(task, binding) {
     'review_history',
   ])
     if (!Array.isArray(checkpoint[key])) throw new Error(`语义路线 checkpoint 缺少 ${key}`);
-  return structuredClone(checkpoint);
+  return {
+    ...structuredClone(checkpoint),
+    version: CHECKPOINT_VERSION,
+    teaching: checkpoint.teaching
+      ? structuredClone(checkpoint.teaching)
+      : structuredClone(expected.teaching),
+  };
+}
+
+async function runPool(items, limit, worker) {
+  let next = 0;
+  let failure;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length && !failure) {
+      const index = next++;
+      try {
+        await worker(items[index], index);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+  });
+  await Promise.all(runners);
+  if (failure) throw failure;
 }
 
 function reviewFingerprint(review, draft) {
@@ -145,6 +179,9 @@ export async function runSemanticRouteGenerationService({
   emit = () => {},
   runCreator,
   runReviewer,
+  runModuleTeacher,
+  runBlockTeacher,
+  runTeachingEditor,
   publishRoute = publishSemanticRouteDelivery,
   createRunners = createPiSemanticRouteRunners,
 }) {
@@ -154,14 +191,17 @@ export async function runSemanticRouteGenerationService({
   if (snapshot?.id !== request?.snapshot_id) throw new Error('路线请求与源码快照不一致');
   if (!sourceGraph || sourceGraph.snapshot_id !== snapshot.id)
     throw new Error('语义路线生成服务需要当前 Snapshot 的代码图');
-  if ((!runCreator || !runReviewer) && (!model || !dataDir))
+  if (
+    (!runCreator || !runReviewer || !runModuleTeacher || !runBlockTeacher || !runTeachingEditor) &&
+    (!model || !dataDir)
+  )
     throw new Error('创建真实语义路线 Agent 时必须提供 model 和 dataDir');
   signal.throwIfAborted();
 
   const existingTask = findRecord(store, 'task', task_id);
   if (existingTask && existingTask.kind !== 'route-generation')
     throw new Error('task_id 已被其他任务占用');
-  if (['investigating', 'reviewing', 'finalizing'].includes(existingTask?.status))
+  if (['investigating', 'reviewing', 'explaining', 'finalizing'].includes(existingTask?.status))
     throw new Error('路线生成任务正在运行');
   const binding = { workspace_id, route_id, snapshot, request };
   let checkpoint = loadCheckpoint(existingTask, binding),
@@ -184,7 +224,12 @@ export async function runSemanticRouteGenerationService({
       ...task,
       model,
       phase,
-      status: phase === 'publishing' ? 'finalizing' : 'investigating',
+      status:
+        phase === 'publishing'
+          ? 'finalizing'
+          : phase === 'explaining'
+            ? 'explaining'
+            : 'investigating',
       checkpoint: structuredClone(checkpoint),
       error: undefined,
       finishedAt: undefined,
@@ -197,6 +242,7 @@ export async function runSemanticRouteGenerationService({
       drafts: checkpoint.draft_ids.length,
       reviews: checkpoint.review_ids.length,
       agent_invocations: checkpoint.agent_invocations,
+      teaching_agent_invocations: checkpoint.teaching.agent_invocations,
       published: Boolean(checkpoint.publication),
     });
   };
@@ -210,7 +256,7 @@ export async function runSemanticRouteGenerationService({
   const sourceUnitService = new SourceUnitService({ store, snapshot, sourceGraph }),
     draftService = new SemanticRouteDraftService({ store, snapshot, sourceUnitService }),
     reviewService = new SemanticRouteReviewService({ store, snapshot, draftService });
-  if (!runCreator || !runReviewer) {
+  if (!runCreator || !runReviewer || !runModuleTeacher || !runBlockTeacher || !runTeachingEditor) {
     const runners = await createRunners({
       store,
       snapshot,
@@ -226,6 +272,9 @@ export async function runSemanticRouteGenerationService({
     });
     runCreator ??= runners.runCreator;
     runReviewer ??= runners.runReviewer;
+    runModuleTeacher ??= runners.runModuleTeacher;
+    runBlockTeacher ??= runners.runBlockTeacher;
+    runTeachingEditor ??= runners.runTeachingEditor;
   }
 
   let latestDraft = checkpoint.draft_ids.length
@@ -273,6 +322,31 @@ export async function runSemanticRouteGenerationService({
       issues: record.issues,
     });
     return recoveryContext(record);
+  };
+
+  const recordTeachingFailure = (scope, target, attempt, error) => {
+    const record = {
+      scope,
+      target,
+      attempt,
+      error: safeError(error),
+      created_at: Date.now(),
+    };
+    checkpoint.teaching.failures.push(record);
+    persist('explaining');
+    emit(
+      attempt < SEMANTIC_ROUTE_RECOVERY_LIMITS.teaching_attempts_per_item
+        ? 'stage_retry'
+        : 'recovery_exhausted',
+      {
+        task_id,
+        scope,
+        target,
+        attempt,
+        strategy: 'fresh_context',
+        reason: record.error,
+      },
+    );
   };
 
   try {
@@ -395,7 +469,183 @@ export async function runSemanticRouteGenerationService({
     }
 
     if (!latestDraft) throw terminalError ?? new Error('Agent 未能生成任何可保存的语义路线草稿');
-    const accepted = latestReview?.status === 'accepted';
+
+    setPhase('explaining');
+    if (checkpoint.teaching.draft_id !== latestDraft.id) {
+      checkpoint.teaching = {
+        draft_id: latestDraft.id,
+        module_ids: [],
+        block_ids: [],
+        revision_id: null,
+        agent_invocations: 0,
+        failures: [],
+      };
+      persist('explaining');
+    }
+    const teachingService = new SemanticRouteTeachingService({ store, draft: latestDraft }),
+      runTeachingItem = async ({ scope, target, invoke, lookup, fallback }) => {
+        const previousFailures = checkpoint.teaching.failures.filter(
+          (item) => item.scope === scope && item.target === target,
+        );
+        const previousAttempts = previousFailures.length;
+        let recovery = previousAttempts
+          ? {
+              previous_error: previousFailures.at(-1).error,
+              instruction: '根据具体错误修正结构或行号，不能原样提交失败数据。',
+            }
+          : undefined;
+        for (
+          let attempt = previousAttempts + 1;
+          attempt <= SEMANTIC_ROUTE_RECOVERY_LIMITS.teaching_attempts_per_item;
+          attempt++
+        ) {
+          signal.throwIfAborted();
+          checkpoint.teaching.agent_invocations++;
+          persist('explaining');
+          try {
+            await invoke(recovery);
+            const saved = lookup();
+            if (!saved) throw new Error('讲解 Agent 未提交有效讲解');
+            return saved;
+          } catch (error) {
+            signal.throwIfAborted();
+            const saved = lookup();
+            if (saved) return saved;
+            recordTeachingFailure(scope, target, attempt, error);
+            recovery = {
+              previous_error: safeError(error),
+              instruction: '根据具体错误修正结构或行号，不能原样提交失败数据。',
+            };
+          }
+        }
+        signal.throwIfAborted();
+        return fallback();
+      };
+
+    await runPool(
+      latestDraft.modules,
+      SEMANTIC_ROUTE_RECOVERY_LIMITS.teaching_concurrency,
+      async (module) => {
+        let created = teachingService.getModule(module.id);
+        if (!created)
+          created = await runTeachingItem({
+            scope: 'semantic_module_teacher',
+            target: module.id,
+            invoke: (recovery_context) =>
+              runModuleTeacher({
+                request,
+                draft: latestDraft,
+                module,
+                recovery_context,
+                services: { teachingService },
+              }),
+            lookup: () => teachingService.getModule(module.id),
+            fallback: () => teachingService.createModuleFallback(module),
+          });
+        if (!checkpoint.teaching.module_ids.includes(created.id))
+          checkpoint.teaching.module_ids.push(created.id);
+        persist('explaining');
+        emit('module', {
+          task_id,
+          status: created.fallback ? 'teaching_fallback' : 'explained',
+          module_id: module.id,
+        });
+      },
+    );
+
+    const blocks = latestDraft.modules.flatMap((module) =>
+      module.steps.map((step) => ({ module, step })),
+    );
+    await runPool(
+      blocks,
+      SEMANTIC_ROUTE_RECOVERY_LIMITS.teaching_concurrency,
+      async ({ module, step }) => {
+        let created = teachingService.getBlock(step.id);
+        if (!created) {
+          const moduleTeaching = teachingService.getModule(module.id);
+          created = await runTeachingItem({
+            scope: 'semantic_block_teacher',
+            target: step.id,
+            invoke: (recovery_context) =>
+              runBlockTeacher({
+                request,
+                draft: latestDraft,
+                module,
+                step,
+                recovery_context,
+                module_teaching: moduleTeaching,
+                services: { teachingService },
+              }),
+            lookup: () => teachingService.getBlock(step.id),
+            fallback: () => teachingService.createBlockFallback(module, step),
+          });
+        }
+        if (!checkpoint.teaching.block_ids.includes(created.id))
+          checkpoint.teaching.block_ids.push(created.id);
+        persist('explaining');
+        emit('module', {
+          task_id,
+          status: created.fallback ? 'block_teaching_fallback' : 'block_explained',
+          module_id: module.id,
+          block_id: step.id,
+        });
+      },
+    );
+
+    let revision = teachingService.getRevision();
+    if (!revision) {
+      const initialTeaching = teachingService.initialTeaching();
+      const previousFailures = checkpoint.teaching.failures.filter(
+        (item) => item.scope === 'semantic_teaching_editor',
+      );
+      const previousAttempts = previousFailures.length;
+      let recovery = previousAttempts
+        ? {
+            previous_error: previousFailures.at(-1).error,
+            instruction: '针对具体错误修正提交；保留无需修改的已有讲解。',
+          }
+        : undefined;
+      for (
+        let attempt = previousAttempts + 1;
+        attempt <= SEMANTIC_ROUTE_RECOVERY_LIMITS.teaching_attempts_per_item && !revision;
+        attempt++
+      ) {
+        signal.throwIfAborted();
+        checkpoint.teaching.agent_invocations++;
+        persist('explaining');
+        try {
+          await runTeachingEditor({
+            request,
+            draft: latestDraft,
+            teaching: initialTeaching,
+            recovery_context: recovery,
+            services: { teachingService },
+          });
+          revision = teachingService.getRevision();
+          if (!revision) throw new Error('最终修订 Agent 未提交有效结果');
+        } catch (error) {
+          signal.throwIfAborted();
+          revision = teachingService.getRevision();
+          if (revision) break;
+          recordTeachingFailure('semantic_teaching_editor', latestDraft.id, attempt, error);
+          recovery = {
+            previous_error: safeError(error),
+            instruction: '针对具体错误修正提交；保留无需修改的已有讲解。',
+          };
+        }
+      }
+    }
+    if (revision) checkpoint.teaching.revision_id = revision.id;
+    const teaching = teachingService.finalTeaching(),
+      unresolvedFallbacks = teaching.modules.reduce(
+        (count, module) =>
+          count +
+          (module.fallback ? 1 : 0) +
+          module.blocks.filter((block) => block.fallback).length,
+        0,
+      ),
+      teachingPartial = unresolvedFallbacks > 0 || !revision,
+      accepted = latestReview?.status === 'accepted' && !teachingPartial;
     setPhase('publishing');
     const publication = await publishRoute({
       store,
@@ -403,10 +653,20 @@ export async function runSemanticRouteGenerationService({
       snapshot,
       draft: latestDraft,
       review: latestReview,
+      teaching,
       route_id,
-      partial_reason: accepted
-        ? undefined
-        : latestReview?.summary || safeError(terminalError ?? '自动语义审核未能闭合'),
+      partial_reason: teachingPartial
+        ? [
+            unresolvedFallbacks
+              ? `有 ${unresolvedFallbacks} 项详细讲解未能完成，已保留路线创建 Agent 的基础讲解。`
+              : '',
+            !revision ? '最终教学修订未完成，已保存生成的讲解初稿。' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')
+        : latestReview?.status === 'accepted'
+          ? undefined
+          : latestReview?.summary || safeError(terminalError ?? '自动语义审核未能闭合'),
     });
     checkpoint.publication = {
       route_id: publication.route.id,
@@ -443,6 +703,7 @@ export async function runSemanticRouteGenerationService({
       task,
       draft: latestDraft,
       review: latestReview,
+      teaching,
       publication,
     };
   } catch (error) {

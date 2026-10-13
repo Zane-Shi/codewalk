@@ -187,6 +187,7 @@ export type RouteModule = {
   order: number;
   title: string;
   narrative: ModuleTeachingNarrative;
+  teaching?: ModuleTeachingExplanation;
   blocks: RouteBlock[];
   incoming_relation_ids: string[];
   outgoing_relation_ids: string[];
@@ -295,11 +296,28 @@ export type BlockTeachingContent = {
   revision_id: string;
   snapshot_id: string;
   block_id: string;
-  explanation: BlockTeachingNarrative & {
+  explanation: Omit<BlockTeachingNarrative, 'takeaways'> & {
+    takeaways?: string[];
+    overview?: string;
+    sections?: FlexibleTeachingSection[];
     block_id: string;
     walkthrough: { title: string; start_line: number; end_line: number; explanation: string }[];
     skip_guidance?: { start_line: number; end_line: number; reason: string }[];
     pseudocode?: string;
   };
   generated_at: number;
+};
+
+export type FlexibleTeachingSection = {
+  kind: string;
+  title: string;
+  content: string;
+  source_ranges?: { start_line: number; end_line: number }[];
+  related_block_ids?: string[];
+};
+
+export type ModuleTeachingExplanation = {
+  overview: string;
+  block_flow: string;
+  sections?: FlexibleTeachingSection[];
 };

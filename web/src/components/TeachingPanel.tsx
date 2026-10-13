@@ -1,7 +1,8 @@
-import { useMemo } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api';
 import type { BlockTeachingContent, RouteBlock, RouteDelivery, SourceLocation } from '../types';
+import { TeachingText } from './TeachingText';
 
 const relationLabels = {
   calls: '调用进入',
@@ -11,6 +12,128 @@ const relationLabels = {
   custom: '特殊交接',
   callback: '回调进入',
 } as const;
+
+function LessonIntro({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const id = useId();
+  const canExpand = text.length > 160 || text.split('\n\n').length > 1;
+  return (
+    <div className="lesson-intro">
+      <div id={id} className={canExpand && !expanded ? 'lesson-intro-preview' : undefined}>
+        <TeachingText text={text} />
+      </div>
+      {canExpand && (
+        <button
+          className="teaching-text-toggle"
+          aria-expanded={expanded}
+          aria-controls={id}
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? '收起完整概述' : '展开完整概述'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function LessonWalkthrough({
+  sections,
+  onSelect,
+}: {
+  sections: BlockTeachingContent['explanation']['walkthrough'];
+  onSelect: (startLine: number, endLine: number, title: string, reason: string) => void;
+}) {
+  const [active, setActive] = useState(0);
+  const [allExpanded, setAllExpanded] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const id = useId();
+  const headers = useRef<(HTMLButtonElement | null)[]>([]);
+  const select = (index: number) => {
+    const section = sections[index];
+    if (!section) return;
+    setActive(index);
+    setCollapsed(false);
+    onSelect(section.start_line, section.end_line, section.title, section.explanation);
+    headers.current[index]?.scrollIntoView({ block: 'nearest' });
+  };
+  return (
+    <section className="walkthrough">
+      <div className="walkthrough-heading">
+        <h4>沿代码往下读</h4>
+        {sections.length > 1 && (
+          <button
+            className="teaching-text-toggle"
+            aria-pressed={allExpanded}
+            onClick={() => setAllExpanded(!allExpanded)}
+          >
+            {allExpanded ? '逐步阅读' : '展开全部'}
+          </button>
+        )}
+      </div>
+      <p className="reading-hint">一次看一步，点击步骤会同步定位源码。</p>
+      {sections.length > 1 && (
+        <nav className="reading-step-navigation" aria-label="讲解步骤">
+          <button disabled={active === 0} onClick={() => select(active - 1)}>
+            上一步
+          </button>
+          <span>
+            步骤 {active + 1} / {sections.length}
+          </span>
+          <button disabled={active === sections.length - 1} onClick={() => select(active + 1)}>
+            下一步
+          </button>
+        </nav>
+      )}
+      <ol>
+        {sections.map((section, index) => {
+          const expanded = allExpanded || (!collapsed && active === index);
+          return (
+            <li
+              key={`${section.start_line}-${section.end_line}-${index}`}
+              className={`reading-step${active === index ? ' is-current' : ''}`}
+            >
+              <button
+                className="reading-step-heading"
+                ref={(node) => {
+                  headers.current[index] = node;
+                }}
+                aria-expanded={expanded}
+                aria-controls={`${id}-${index}`}
+                aria-current={active === index ? 'step' : undefined}
+                onClick={() => {
+                  if (!allExpanded && active === index && !collapsed) {
+                    setCollapsed(true);
+                  } else {
+                    setAllExpanded(false);
+                    select(index);
+                  }
+                }}
+              >
+                <span className="reading-step-number">{String(index + 1).padStart(2, '0')}</span>
+                <span className="reading-step-title">
+                  <strong>{section.title}</strong>
+                  <small>
+                    L{section.start_line}
+                    {section.end_line !== section.start_line && `–${section.end_line}`}
+                  </small>
+                </span>
+                <span className="reading-step-chevron" aria-hidden="true">
+                  {expanded ? '−' : '+'}
+                </span>
+              </button>
+              <div id={`${id}-${index}`} className="reading-step-body" hidden={!expanded}>
+                <TeachingText text={section.explanation} />
+                <button className="teaching-text-toggle" onClick={() => select(index)}>
+                  在源码中定位
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
 
 export function TeachingPanel({
   route,
@@ -30,15 +153,20 @@ export function TeachingPanel({
       route?.modules.flatMap((module) => module.blocks.map((block) => ({ module, block }))) ?? [],
     [route],
   );
-  const currentIndex = blocks.findIndex((item) => item.block.id === activeBlockId);
+  const requestedIndex = blocks.findIndex((item) => item.block.id === activeBlockId);
   const current =
-    currentIndex >= 0
-      ? blocks[currentIndex]
+    requestedIndex >= 0
+      ? blocks[requestedIndex]
       : (blocks.find((item) => item.module.id === activeModuleId) ?? blocks[0]);
+  const currentIndex = current ? blocks.indexOf(current) : -1;
   const module = current?.module;
   const block = current?.block;
+  const scroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    scroll.current?.scrollTo({ top: 0 });
+  }, [block?.id, route?.revision_id]);
   const content = useQuery({
-    queryKey: ['route-block', route?.id, block?.id],
+    queryKey: ['route-block', route?.id, block?.id, route?.revision_id],
     queryFn: () =>
       api<BlockTeachingContent>(
         `/api/routes/${encodeURIComponent(route!.id)}/blocks/${encodeURIComponent(block!.id)}`,
@@ -75,25 +203,56 @@ export function TeachingPanel({
   const explanation = content.data?.explanation;
   return (
     <section className="teaching-panel">
-      <div className="teaching-scroll">
+      <div className="teaching-scroll" ref={scroll}>
         <header className="module-brief">
           <small>
             模块 {module.order} / {route.modules.length}
           </small>
-          <h2>{module.title}</h2>
-          <p>{module.narrative.summary}</p>
-          <dl>
-            <div>
-              <dt>进入时</dt>
-              <dd>{module.narrative.expected_input}</dd>
-            </div>
-            <div>
-              <dt>离开时</dt>
-              <dd>{module.narrative.expected_outcome}</dd>
-            </div>
-          </dl>
+          <details className="module-background" key={`${module.id}:${route.revision_id}`}>
+            <summary>
+              <span>{module.title}</span>
+              <small>了解这个模块</small>
+            </summary>
+            {module.teaching ? (
+              <>
+                <TeachingText text={module.teaching.overview} />
+                <details className="teaching-extra">
+                  <summary>这些代码如何一起工作</summary>
+                  <TeachingText text={module.teaching.block_flow} />
+                </details>
+                {module.teaching.sections?.map((section, index) => (
+                  <details className="teaching-extra" key={index}>
+                    <summary>{section.title}</summary>
+                    <TeachingText text={section.content} />
+                    {section.related_block_ids?.map((id) => {
+                      const target = module.blocks.find((item) => item.id === id);
+                      return target ? (
+                        <button key={id} onClick={() => onOpenBlock(module.id, target)}>
+                          {target.title}
+                        </button>
+                      ) : null;
+                    })}
+                  </details>
+                ))}
+              </>
+            ) : (
+              <>
+                <p>{module.narrative.summary}</p>
+                <dl>
+                  <div>
+                    <dt>进入时</dt>
+                    <dd>{module.narrative.expected_input}</dd>
+                  </div>
+                  <div>
+                    <dt>离开时</dt>
+                    <dd>{module.narrative.expected_outcome}</dd>
+                  </div>
+                </dl>
+              </>
+            )}
+          </details>
         </header>
-        <article className="block-lesson">
+        <article className="block-lesson" key={`${block.id}:${route.revision_id}`}>
           <div className="lesson-kicker">
             代码块 {block.route_order} / {blocks.length}
           </div>
@@ -112,42 +271,40 @@ export function TeachingPanel({
             {block.source.location.file}:L{block.source.location.start.line}–
             {block.source.location.end.line}
           </button>
-          <p className="lesson-summary">{explanation?.summary ?? block.narrative.summary}</p>
-          <section className="why-read">
-            <strong>为什么现在读</strong>
-            <p>{explanation?.why_read ?? block.narrative.why_read}</p>
-          </section>
+          <LessonIntro
+            text={explanation?.overview ?? explanation?.summary ?? block.narrative.summary}
+          />
+          <details className="why-read">
+            <summary>为什么现在读这段代码？</summary>
+            <TeachingText text={explanation?.why_read ?? block.narrative.why_read} />
+          </details>
 
           {content.isLoading && <p className="teaching-status">正在读取已保存的讲解…</p>}
           {content.error && <p className="route-error">{content.error.message}</p>}
           {explanation?.walkthrough?.length ? (
-            <section className="walkthrough">
-              <h4>沿代码往下读</h4>
-              <ol>
-                {explanation.walkthrough.map((section, index) => (
-                  <li key={`${section.start_line}-${section.end_line}-${index}`}>
-                    <button
-                      onClick={() =>
-                        navigateRange(
-                          section.start_line,
-                          section.end_line,
-                          section.title,
-                          section.explanation,
-                        )
-                      }
-                    >
-                      <span>
-                        L{section.start_line}
-                        {section.end_line !== section.start_line && `–${section.end_line}`}
-                      </span>
-                      <strong>{section.title}</strong>
-                    </button>
-                    <p>{section.explanation}</p>
-                  </li>
-                ))}
-              </ol>
-            </section>
+            <LessonWalkthrough sections={explanation.walkthrough} onSelect={navigateRange} />
           ) : null}
+
+          {explanation?.sections?.length ? (
+            <h4 className="lesson-extras-heading">想了解更多</h4>
+          ) : null}
+          {explanation?.sections?.map((section, index) => (
+            <details className="teaching-extra" key={`${section.kind}-${index}`}>
+              <summary>{section.title}</summary>
+              <TeachingText text={section.content} />
+              {section.source_ranges?.map((range, rangeIndex) => (
+                <button
+                  key={rangeIndex}
+                  className="source-jump"
+                  onClick={() =>
+                    navigateRange(range.start_line, range.end_line, section.title, section.content)
+                  }
+                >
+                  L{range.start_line}–{range.end_line}
+                </button>
+              ))}
+            </details>
+          ))}
 
           {relations.length > 0 && (
             <section className="handoffs">
@@ -220,14 +377,22 @@ export function TeachingPanel({
               <pre>{explanation.pseudocode}</pre>
             </details>
           )}
-          <section className="takeaways">
-            <h4>读完记住</h4>
-            <ul>
-              {(explanation?.takeaways ?? block.narrative.takeaways).map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </section>
+          {(
+            explanation?.overview
+              ? explanation.takeaways?.length
+              : (explanation?.takeaways ?? block.narrative.takeaways).length
+          ) ? (
+            <details className="takeaways">
+              <summary>读完记住</summary>
+              <ul>
+                {(explanation?.takeaways ?? block.narrative.takeaways).map((item) => (
+                  <li key={item}>
+                    <TeachingText text={item} />
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
         </article>
       </div>
       <footer className="lesson-navigation">

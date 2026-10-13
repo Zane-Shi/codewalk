@@ -1346,7 +1346,7 @@ body.resizing-panels * {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px 24px;
+  padding: 18px 20px 28px;
   scrollbar-width: thin;
 }
 .teaching-empty {
@@ -1358,8 +1358,30 @@ body.resizing-panels * {
   color: #334e40;
 }
 .module-brief {
-  padding-bottom: 14px;
+  padding-bottom: 12px;
   border-bottom: 1px solid #dce5df;
+}
+.module-background > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  justify-content: space-between;
+  padding-top: 6px;
+  cursor: pointer;
+  color: #53695c;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.module-background > summary span {
+  flex: 1;
+}
+.module-background > summary small {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #718278;
+}
+.module-background[open] > summary {
+  margin-bottom: 12px;
 }
 .module-brief h2 {
   margin: 5px 0 6px;
@@ -1397,9 +1419,9 @@ body.resizing-panels * {
   padding-top: 16px;
 }
 .block-lesson h3 {
-  margin: 4px 0 7px;
-  font-size: 16px;
-  line-height: 1.4;
+  margin: 7px 0 12px;
+  font-size: 18px;
+  line-height: 1.55;
 }
 .source-jump {
   max-width: 100%;
@@ -1419,10 +1441,12 @@ body.resizing-panels * {
   color: #344a3e;
 }
 .why-read {
-  margin: 14px 0;
-  padding: 10px 11px;
-  border-left: 3px solid #d5a852;
-  background: #fff9eb;
+  margin: 16px 0 22px;
+  color: #68766e;
+  font-size: 12px;
+}
+.why-read summary {
+  cursor: pointer;
 }
 .why-read strong,
 .walkthrough h4,
@@ -1442,39 +1466,112 @@ body.resizing-panels * {
   color: #708278;
 }
 .walkthrough {
-  margin-top: 18px;
+  margin-top: 24px;
 }
-.walkthrough ol {
+.walkthrough > ol {
   list-style: none;
-  margin: 8px 0 0;
-  padding: 0 0 0 8px;
-  border-left: 1px solid #cbdacf;
+  margin: 14px 0 0;
+  padding: 0;
 }
-.walkthrough li {
-  padding: 0 0 14px 10px;
+.walkthrough > ol > li {
+  margin-bottom: 8px;
+  padding: 0;
+  border: 1px solid #e2e9e4;
+  border-radius: 9px;
+  background: #fff;
 }
-.walkthrough button {
+.walkthrough .reading-step-heading {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
   width: 100%;
-  padding: 0;
+  padding: 12px;
   border: 0;
   background: transparent;
   color: #355b49;
   text-align: left;
   white-space: normal;
 }
-.walkthrough button span {
+.walkthrough .reading-step-number {
   flex: 0 0 auto;
-  padding: 3px 5px;
-  border-radius: 3px;
-  background: #e1ebe5;
+  padding: 5px;
+  border-radius: 5px;
+  background: #edf3ef;
   font:
-    9px ui-monospace,
+    11px ui-monospace,
     monospace;
 }
-.walkthrough button strong {
+.reading-step-title {
+  flex: 1;
+  min-width: 0;
+}
+.reading-step-title strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.reading-step-title small {
+  display: block;
+  margin-top: 3px;
+  font:
+    10px/1.5 ui-monospace,
+    monospace;
+  color: #78867e;
+}
+.reading-step-chevron {
+  color: #8a9890;
+  font-size: 15px;
+}
+.walkthrough > ol > li.is-current {
+  border-color: #b9d1c2;
+}
+.is-current .reading-step-number {
+  background: #28634d;
+  color: #fff;
+}
+.reading-step-body {
+  padding: 0 14px 16px;
+}
+.reading-step-body > .teaching-text > :first-child {
+  margin-top: 2px;
+}
+.walkthrough-heading,
+.reading-step-navigation {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.walkthrough-heading h4 {
+  margin: 0;
+  color: #3d5549;
+  font-size: 14px;
+}
+.reading-hint {
+  color: #7b8981;
+  font-size: 11px;
+}
+.reading-step-navigation {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin-top: 12px;
+  padding: 8px 0;
+  background: #f6f8f6;
+  border-bottom: 1px solid #e2e9e4;
+}
+.reading-step-navigation button {
+  padding: 6px 10px;
+  border-color: #dce5df;
+  background: #fff;
+  color: #355b49;
+  font-size: 12px;
+}
+.reading-step-navigation button:disabled {
+  cursor: default;
+}
+.reading-step-navigation span {
+  color: #78867e;
   font-size: 11px;
 }
 .walkthrough p {
@@ -1571,6 +1668,96 @@ body.resizing-panels * {
   margin: 4px 0;
   font-size: 11px;
   line-height: 1.6;
+}
+
+.teaching-text {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.9;
+  color: #344a3e;
+}
+.teaching-text p,
+.module-brief .teaching-text p,
+.walkthrough .teaching-text p {
+  margin: 14px 0;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+}
+.teaching-text code {
+  padding: 1px 3px;
+  background: #edf3ef;
+  border-radius: 3px;
+  font-size: 0.92em;
+}
+.teaching-text pre {
+  overflow-x: auto;
+  padding: 10px;
+  background: #edf3ef;
+  white-space: pre;
+}
+.teaching-text pre code {
+  padding: 0;
+}
+.teaching-text ul,
+.teaching-text ol {
+  padding-left: 22px;
+}
+.teaching-extra {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #e0e7e2;
+  border-radius: 8px;
+  background: #fff;
+}
+.teaching-extra h4,
+.module-brief h4 {
+  margin: 10px 0 5px;
+  color: #3d5549;
+  font-size: 13px;
+}
+.teaching-extra summary {
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.65;
+  color: #526b5d;
+}
+.lesson-intro {
+  margin-top: 16px;
+}
+.lesson-intro-preview {
+  max-height: 7.6em;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.9;
+  mask-image: linear-gradient(to bottom, #000 80%, transparent);
+}
+.lesson-intro .teaching-text > :first-child {
+  margin-top: 0;
+}
+.teaching-panel .teaching-text-toggle {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: #426b55;
+  font-size: 11px;
+  text-align: left;
+}
+.teaching-panel button:focus-visible,
+.teaching-panel summary:focus-visible {
+  outline: 2px solid #568e78;
+  outline-offset: 3px;
+}
+.lesson-extras-heading {
+  margin: 28px 0 12px;
+  color: #6b7d71;
+  font-size: 12px;
+  font-weight: 500;
+}
+.takeaways summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #426b55;
 }
 .lesson-navigation {
   display: grid;
