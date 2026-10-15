@@ -2139,6 +2139,16 @@ body.resizing-panels * {
   color: #667a6f;
   font-size: 13px;
 }
+.project-import {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 7px;
+}
+.project-import > span {
+  color: #718078;
+  font-size: 11px;
+  text-align: center;
+}
 .projects-heading form {
   display: grid;
   grid-template-columns: minmax(280px, 430px) auto;

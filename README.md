@@ -65,8 +65,8 @@ npm start
 确认 `node --version`、`npm --version`、`rg --version` 和 `dekko --version` 都能正常运行。
 启动后打开 <http://127.0.0.1:3000/projects>。
 
-导入项目时填写绝对路径，例如 Linux 下的 `/home/me/projects/my-app`，或 Windows 下的
-`C:\projects\my-app`。
+导入项目时点击“选择本地项目”，在系统目录选择器中选中源码文件夹即可。也可以手动填写绝对路径，
+例如 Linux 下的 `/home/me/projects/my-app`，或 Windows 下的 `C:\projects\my-app`。
 
 ## 模型配置
 
@@ -130,7 +130,7 @@ npm start
 
 ## 使用方法
 
-1. 在项目页输入源码目录的绝对路径并导入项目。
+1. 在项目页点击“选择本地项目”，选中源码目录并导入项目。
 2. 生成项目总览，了解用途、目录和主要模块。
 3. 输入一个具体问题，或让 Agent 选择默认场景并生成路线。
 4. 在左侧选择模块和代码块，中间阅读源码，右侧查看讲解。

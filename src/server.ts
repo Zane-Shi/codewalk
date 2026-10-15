@@ -13,6 +13,7 @@ import { ModelSettingsService } from './model-settings.ts';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { validationFailureDetails } from './validation-feedback.ts';
 import { RECOVERY_LIMITS, runWithRecovery } from './recovery-controller.ts';
+import { pickProjectDirectory } from './directory-picker.ts';
 
 const webRoot = path.resolve(fileURLToPath(new URL('../web/dist/', import.meta.url)));
 const webTypes = {
@@ -44,6 +45,7 @@ export async function createApp({
   routeRunner,
   models,
   modelSettings,
+  directoryPicker = pickProjectDirectory,
 } = {}) {
   dataDir = path.resolve(dataDir ?? '.codewalk');
   await mkdir(dataDir, { recursive: true });
@@ -116,6 +118,15 @@ export async function createApp({
       }
       if (req.method === 'GET' && url.pathname === '/api/projects')
         return json(200, projects.listProjects());
+      if (req.method === 'POST' && url.pathname === '/api/project-directory') {
+        const selectedPath = await directoryPicker();
+        if (
+          selectedPath !== null &&
+          (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath))
+        )
+          throw new Error('目录选择器没有返回有效的绝对路径');
+        return json(200, { path: selectedPath });
+      }
       if (req.method === 'POST' && url.pathname === '/api/projects') {
         const input = await body(req);
         if (typeof input.path !== 'string' || !path.isAbsolute(input.path))

@@ -137,6 +137,15 @@ export function App() {
       navigate(`/projects/${result.project.id}/overview`);
     },
   });
+  const selectedDirectory = useMutation({
+    mutationFn: () =>
+      api<{ path: string | null }>('/api/project-directory', {
+        method: 'POST',
+      }),
+    onSuccess: (result) => {
+      if (result.path) imported.mutate(result.path);
+    },
+  });
   useEffect(() => {
     const available = models.data ?? [];
     if (!available.length || modelSettings.isLoading) return;
@@ -227,8 +236,16 @@ export function App() {
             <ProjectsPage
               projects={projectList}
               busy={imported.isPending}
-              error={imported.error?.message}
-              onImport={(sourcePath) => imported.mutate(sourcePath)}
+              choosing={selectedDirectory.isPending}
+              error={selectedDirectory.error?.message ?? imported.error?.message}
+              onChoose={() => {
+                imported.reset();
+                selectedDirectory.mutate();
+              }}
+              onImport={(sourcePath) => {
+                selectedDirectory.reset();
+                imported.mutate(sourcePath);
+              }}
               onOpen={(project) => navigate(`/projects/${project.id}/overview`)}
             />
           }

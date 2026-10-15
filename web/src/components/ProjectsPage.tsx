@@ -4,13 +4,17 @@ import type { ProjectListItem } from '../types';
 export function ProjectsPage({
   projects,
   busy,
+  choosing,
   error,
+  onChoose,
   onImport,
   onOpen,
 }: {
   projects: ProjectListItem[];
   busy: boolean;
+  choosing: boolean;
   error?: string;
+  onChoose: () => void;
   onImport: (path: string) => void;
   onOpen: (project: ProjectListItem) => void;
 }) {
@@ -23,22 +27,34 @@ export function ProjectsPage({
           <h1>项目</h1>
           <p>每个项目独立保存总览、阅读路线、源码版本和批注。</p>
         </div>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (path.trim()) onImport(path.trim());
-          }}
-        >
-          <input
-            aria-label="项目目录"
-            value={path}
-            onChange={(event) => setPath(event.target.value)}
-            placeholder="输入本地项目绝对路径"
-          />
-          <button aria-busy={busy} disabled={busy || !path.trim()}>
-            {busy ? '正在导入' : '导入项目'}
+        <div className="project-import">
+          <button
+            type="button"
+            aria-busy={choosing || busy}
+            disabled={choosing || busy}
+            onClick={onChoose}
+          >
+            {choosing ? '正在打开选择器' : busy ? '正在导入' : '选择本地项目'}
           </button>
-        </form>
+          <span>或输入绝对路径</span>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (path.trim()) onImport(path.trim());
+            }}
+          >
+            <input
+              aria-label="项目目录"
+              value={path}
+              disabled={choosing || busy}
+              onChange={(event) => setPath(event.target.value)}
+              placeholder="本地项目绝对路径"
+            />
+            <button aria-busy={busy} disabled={choosing || busy || !path.trim()}>
+              {busy ? '正在导入' : '按路径导入'}
+            </button>
+          </form>
+        </div>
       </header>
       {error && (
         <p className="project-error" role="alert">
