@@ -35,7 +35,9 @@ export function ProjectsPage({
             onChange={(event) => setPath(event.target.value)}
             placeholder="输入本地项目绝对路径"
           />
-          <button disabled={busy || !path.trim()}>{busy ? '正在导入' : '导入项目'}</button>
+          <button aria-busy={busy} disabled={busy || !path.trim()}>
+            {busy ? '正在导入' : '导入项目'}
+          </button>
         </form>
       </header>
       {error && (
