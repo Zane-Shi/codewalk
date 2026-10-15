@@ -1,4 +1,5 @@
 import { mkdir, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
   createAgentSession,
@@ -20,6 +21,7 @@ import { createBoundedSourceTools } from './source-tools.ts';
 import { createSourceUnitBatchTools } from './source-units.ts';
 import { createSemanticRouteDraftTool } from './semantic-route-drafts.ts';
 import { createSemanticRouteReviewTool } from './semantic-route-review.ts';
+import { prepareRouteAgentSession } from './route-agent-sessions.ts';
 import {
   createBlockTeachingTool,
   createInspectTeachingSourceTool,
@@ -86,6 +88,7 @@ async function openSemanticSession({
   tools,
   enabledTools,
   thinkingLevel = 'off',
+  persistenceOptions,
 }) {
   const agentDir = path.join(dataDir, `pi-config-${stageName}`);
   await mkdir(agentDir, { recursive: true });
@@ -97,19 +100,36 @@ async function openSemanticSession({
       settingsManager,
       prompt,
     });
-  const { session } = await createAgentSession({
-    cwd: snapshot.root,
-    agentDir,
-    model: selected,
-    modelRuntime: runtime,
-    thinkingLevel,
-    settingsManager,
-    resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(snapshot.root),
-    customTools: tools,
-    tools: enabledTools,
+  const persistence = await prepareRouteAgentSession({
+    ...persistenceOptions,
+    snapshot,
+    dataDir,
+    model: `${selected.provider}/${selected.id}`,
+    modelSettings: { api: selected.api, baseUrl: selected.baseUrl, thinkingLevel },
+    stageName,
+    prompt,
+    tools,
+    enabledTools,
   });
-  return session;
+  let session;
+  try {
+    ({ session } = await createAgentSession({
+      cwd: snapshot.root,
+      agentDir,
+      model: selected,
+      modelRuntime: runtime,
+      thinkingLevel,
+      settingsManager,
+      resourceLoader: loader,
+      sessionManager: persistence.manager,
+      customTools: tools,
+      tools: enabledTools,
+    }));
+    persistence.track(session);
+    return { session, persistence };
+  } catch (error) {
+    throw persistence.finish({ error });
+  }
 }
 
 function trackTeachingSession({ session, store, draft, stageName, target, maxTurns = 8 }) {
@@ -175,9 +195,36 @@ async function openTeachingSession({
   return session;
 }
 
-async function runPromptWithForcedSubmission({ session, input, submitName, submitted, signal }) {
+async function runPromptWithForcedSubmission({
+  session,
+  input,
+  submitName,
+  submitted,
+  signal,
+  resumed = false,
+}) {
   signal.throwIfAborted();
-  await session.prompt(JSON.stringify(input), { expandPromptTemplates: false });
+  const promptInput = resumed
+    ? {
+        task: 'continue_interrupted_stage',
+        output_tool: submitName,
+        instruction:
+          '继续已保存的当前阶段会话，不要从头重复调查。此前是外部中断，不是语义审核失败。对结果未落盘的工具调用，不得假定未执行或直接重放提交；先核对已保存业务成果。完成后使用原提交工具。',
+        confirmed_source_batches: input.reusable_confirmed_source_batches?.map((batch) => ({
+          batch_id: batch.batch_id,
+          revision: batch.revision,
+          module_id: batch.module_id,
+          units: batch.units.map((unit) => ({
+            id: unit.id,
+            file: unit.file,
+            start_line: unit.start_line,
+            end_line: unit.end_line,
+          })),
+        })),
+      }
+    : input;
+  await session.prompt(JSON.stringify(promptInput), { expandPromptTemplates: false });
+  signal.throwIfAborted();
   if (modelFailure(session))
     throw new Error(`模型调用失败：${JSON.stringify(modelFailure(session))}`);
   if (!submitted())
@@ -239,23 +286,35 @@ export async function createPiSemanticRouteRunners({
 }) {
   const runtime = modelRuntime ?? (await ModelRuntime.create()),
     selected = await selectedModel(runtime, model);
-  let creatorSequence = 0,
-    reviewerSequence = 0,
-    teacherSequence = 0,
+  let teacherSequence = 0,
     editorSequence = 0;
 
-  const runCreator = async ({ request, previous_draft, previous_review, recovery_context }) => {
+  const runCreator = async ({
+    request,
+    previous_draft,
+    previous_review,
+    recovery_context,
+    stage_attempt,
+  }) => {
     signal.throwIfAborted();
-    const stageName = `semantic-creator-${++creatorSequence}`,
+    const attempt = stage_attempt ?? {
+      id: randomUUID(),
+      kind: 'creator',
+      target: request.request_id,
+    };
+    const stageName = `semantic-creator-${attempt.id}`,
       counters = { calls: 0, reads: 0 },
       sourceTools = createBoundedSourceTools(
         snapshot,
         CREATOR_LIMITS,
         counters,
         signal,
-        (type, value) => emit(type, { stage: stageName, ...value }),
+        (type, value) => {
+          persistence?.progress();
+          emit(type, { stage: stageName, ...value });
+        },
       );
-    let draft, session;
+    let draft, session, persistence, stageError;
     const unitTools = createSourceUnitBatchTools({
         service: sourceUnitService,
         reviewer_id: stageName,
@@ -269,7 +328,7 @@ export async function createPiSemanticRouteRunners({
         },
       }),
       workflowTools = [...unitTools, draftTool];
-    session = await openSemanticSession({
+    ({ session, persistence } = await openSemanticSession({
       snapshot,
       selected,
       runtime,
@@ -282,7 +341,18 @@ export async function createPiSemanticRouteRunners({
         ...DEKKO_ROUTE_TOOL_NAMES,
         ...workflowTools.map((tool) => tool.name),
       ],
-    });
+      persistenceOptions: {
+        store,
+        attempt,
+        counters,
+        binding: {
+          request,
+          previous_draft: previous_draft?.id,
+          previous_review: previous_review?.id,
+          recovery_context: recovery_context ?? null,
+        },
+      },
+    }));
     const abort = () => void session.abort().catch(() => {});
     signal.addEventListener('abort', abort, { once: true });
     try {
@@ -292,6 +362,9 @@ export async function createPiSemanticRouteRunners({
         workflowTools.map((tool) => tool.name),
         { signal, investigationToolNames: ROUTE_INVESTIGATION_TOOL_NAMES },
       );
+      if (counters.calls >= CREATOR_LIMITS.maxCalls)
+        session.setActiveToolsByName(workflowTools.map((tool) => tool.name));
+      emit('stage_session', { stage: stageName, resumed: persistence.resumed });
       const off = session.subscribe((event) => {
         if (
           event.type !== 'tool_execution_start' ||
@@ -299,6 +372,7 @@ export async function createPiSemanticRouteRunners({
         )
           return;
         counters.calls++;
+        persistence.progress();
         emit('tool', { stage: stageName, tool: event.toolName });
         if (counters.calls >= CREATOR_LIMITS.maxCalls && !draft)
           session.setActiveToolsByName(workflowTools.map((tool) => tool.name));
@@ -309,6 +383,7 @@ export async function createPiSemanticRouteRunners({
           submitName: draftTool.name,
           submitted: () => Boolean(draft),
           signal,
+          resumed: persistence.resumed,
           input: {
             task: 'create_semantic_reading_route',
             request,
@@ -338,22 +413,30 @@ export async function createPiSemanticRouteRunners({
         draft_id: draft.id,
       });
       return draft;
+    } catch (error) {
+      stageError = error;
+      throw persistence.finish({ completed: Boolean(draft), error, signal });
     } finally {
+      if (!stageError) persistence.finish({ completed: Boolean(draft), signal });
       signal.removeEventListener('abort', abort);
       await disposeRoutePlanningSession(session);
     }
   };
 
-  const runReviewer = async ({ draft, recovery_context }) => {
+  const runReviewer = async ({ draft, recovery_context, stage_attempt }) => {
     signal.throwIfAborted();
-    const stageName = `semantic-reviewer-${++reviewerSequence}`,
+    const attempt = stage_attempt ?? { id: randomUUID(), kind: 'reviewer', target: draft.id };
+    const stageName = `semantic-reviewer-${attempt.id}`,
       counters = { calls: 0, reads: 0 },
       sourceTools = createBoundedSourceTools(
         snapshot,
         REVIEWER_LIMITS,
         counters,
         signal,
-        (type, value) => emit(type, { stage: stageName, ...value }),
+        (type, value) => {
+          persistence?.progress();
+          emit(type, { stage: stageName, ...value });
+        },
       ),
       overviewTool = createGetProjectOverviewTool({
         snapshot,
@@ -362,7 +445,7 @@ export async function createPiSemanticRouteRunners({
             .list('overview')
             .find((item) => item.snapshotId === snapshot.id || item.id === snapshot.id),
       });
-    let review, session;
+    let review, session, persistence, stageError;
     const tool = createSemanticRouteReviewTool({
       service: reviewService,
       reviewer_id: stageName,
@@ -372,7 +455,7 @@ export async function createPiSemanticRouteRunners({
         session?.setActiveToolsByName([]);
       },
     });
-    session = await openSemanticSession({
+    ({ session, persistence } = await openSemanticSession({
       snapshot,
       selected,
       runtime,
@@ -382,7 +465,17 @@ export async function createPiSemanticRouteRunners({
       tools: [...sourceTools, overviewTool, tool],
       enabledTools: [...SEMANTIC_REVIEWER_READ_ONLY_TOOL_NAMES, tool.name],
       thinkingLevel: semanticReviewerThinkingLevel(selected),
-    });
+      persistenceOptions: {
+        store,
+        attempt,
+        counters,
+        binding: {
+          draft_id: draft.id,
+          draft_digest: draft.decision_digest,
+          recovery_context: recovery_context ?? null,
+        },
+      },
+    }));
     const abort = () => void session.abort().catch(() => {});
     signal.addEventListener('abort', abort, { once: true });
     try {
@@ -391,6 +484,8 @@ export async function createPiSemanticRouteRunners({
         signal,
         investigationToolNames: SEMANTIC_REVIEWER_READ_ONLY_TOOL_NAMES,
       });
+      if (counters.calls >= REVIEWER_LIMITS.maxCalls) session.setActiveToolsByName([tool.name]);
+      emit('stage_session', { stage: stageName, resumed: persistence.resumed });
       const off = session.subscribe((event) => {
         if (
           event.type !== 'tool_execution_start' ||
@@ -398,6 +493,7 @@ export async function createPiSemanticRouteRunners({
         )
           return;
         counters.calls++;
+        persistence.progress();
         emit('tool', { stage: stageName, tool: event.toolName });
         if (counters.calls >= REVIEWER_LIMITS.maxCalls && !review)
           session.setActiveToolsByName([tool.name]);
@@ -408,6 +504,7 @@ export async function createPiSemanticRouteRunners({
           submitName: tool.name,
           submitted: () => Boolean(review),
           signal,
+          resumed: persistence.resumed,
           input: {
             task: 'review_complete_semantic_route',
             review_packet: reviewService.reviewInput(draft.id),
@@ -426,7 +523,11 @@ export async function createPiSemanticRouteRunners({
         issues: review.issues.length,
       });
       return review;
+    } catch (error) {
+      stageError = error;
+      throw persistence.finish({ completed: Boolean(review), error, signal });
     } finally {
+      if (!stageError) persistence.finish({ completed: Boolean(review), signal });
       signal.removeEventListener('abort', abort);
       await disposeRoutePlanningSession(session);
     }

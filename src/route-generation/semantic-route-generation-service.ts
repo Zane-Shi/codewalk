@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { validationFailureDetails } from '../validation-feedback.ts';
 import { recoveryFailure } from '../recovery-controller.ts';
 import { SourceUnitService } from './source-units.ts';
@@ -9,7 +9,7 @@ import { publishSemanticRouteDelivery } from './semantic-route-delivery.ts';
 import { SemanticRouteTeachingService } from './semantic-route-teaching.ts';
 
 const CHECKPOINT_KIND = 'semantic-route-generation';
-const CHECKPOINT_VERSION = 2;
+const CHECKPOINT_VERSION = 3;
 export const SEMANTIC_ROUTE_RECOVERY_LIMITS = Object.freeze({
   creator_attempts: 3,
   reviewer_attempts_per_draft: 2,
@@ -44,6 +44,8 @@ function initialCheckpoint({ workspace_id, route_id, snapshot, request }) {
     agent_invocations: 0,
     recovery_attempts: [],
     review_history: [],
+    active_stage: null,
+    session_resumptions: 0,
     teaching: {
       draft_id: null,
       module_ids: [],
@@ -59,7 +61,10 @@ function loadCheckpoint(task, binding) {
   const expected = initialCheckpoint(binding),
     checkpoint = task?.checkpoint;
   if (!checkpoint) return expected;
-  if (checkpoint.kind !== CHECKPOINT_KIND || ![1, CHECKPOINT_VERSION].includes(checkpoint.version))
+  if (
+    checkpoint.kind !== CHECKPOINT_KIND ||
+    ![1, 2, CHECKPOINT_VERSION].includes(checkpoint.version)
+  )
     throw new Error('语义路线 checkpoint 格式无效');
   for (const key of ['workspace_id', 'route_id', 'snapshot_id', 'request_id', 'request_digest'])
     if (checkpoint[key] !== expected[key])
@@ -72,9 +77,20 @@ function loadCheckpoint(task, binding) {
     'review_history',
   ])
     if (!Array.isArray(checkpoint[key])) throw new Error(`语义路线 checkpoint 缺少 ${key}`);
+  if (
+    checkpoint.active_stage &&
+    (!['creator', 'reviewer'].includes(checkpoint.active_stage.kind) ||
+      typeof checkpoint.active_stage.id !== 'string' ||
+      !checkpoint.active_stage.id ||
+      typeof checkpoint.active_stage.target !== 'string' ||
+      checkpoint.active_stage.task_id !== task.id)
+  )
+    throw new Error('语义路线 checkpoint 的 active_stage 无效');
   return {
     ...structuredClone(checkpoint),
     version: CHECKPOINT_VERSION,
+    active_stage: checkpoint.active_stage ?? null,
+    session_resumptions: checkpoint.session_resumptions ?? 0,
     teaching: checkpoint.teaching
       ? structuredClone(checkpoint.teaching)
       : structuredClone(expected.teaching),
@@ -157,10 +173,15 @@ function reviewRecoveryContext(review, draft, repeated) {
   };
 }
 
-function mostRecentPersistedDraft(store, requestId, knownIds) {
+function mostRecentPersistedDraft(store, requestId, knownIds, creatorId) {
   return store
     .list('semantic_route_draft')
-    .filter((item) => item.request_id === requestId && !knownIds.includes(item.id))
+    .filter(
+      (item) =>
+        item.request_id === requestId &&
+        !knownIds.includes(item.id) &&
+        (!creatorId || item.creator_id === creatorId),
+    )
     .sort((left, right) => right.created_at - left.created_at)[0];
 }
 
@@ -289,9 +310,34 @@ export async function runSemanticRouteGenerationService({
           }
         })()
       : undefined,
-    creatorRecovery,
-    reviewerRecovery,
+    creatorRecovery = (() => {
+      const previous = [...checkpoint.recovery_attempts]
+        .reverse()
+        .find((item) => item.scope === 'semantic_creator');
+      return previous ? recoveryContext(previous) : undefined;
+    })(),
+    reviewerRecovery = (() => {
+      const previous = [...checkpoint.recovery_attempts]
+        .reverse()
+        .find((item) => item.scope === 'semantic_reviewer' && item.draft_id === latestDraft?.id);
+      return previous ? recoveryContext(previous) : undefined;
+    })(),
     terminalError;
+
+  const beginStage = (kind, target) => {
+    if (checkpoint.active_stage?.kind === kind && checkpoint.active_stage.target === target) {
+      checkpoint.session_resumptions++;
+      persist();
+      return structuredClone(checkpoint.active_stage);
+    }
+    checkpoint.active_stage = { id: randomUUID(), kind, target, task_id };
+    if (kind === 'creator') checkpoint.creator_attempts++;
+    else incrementReviewerAttempts(checkpoint, target);
+    checkpoint.agent_invocations++;
+    persist();
+    return structuredClone(checkpoint.active_stage);
+  };
+  const stageInterrupted = (error) => signal.aborted || error?.code === 'ROUTE_SESSION_INTERRUPTED';
 
   const recordFailure = (scope, details, error) => {
     const failure = recoveryFailure(error, { scope, details }),
@@ -350,15 +396,56 @@ export async function runSemanticRouteGenerationService({
   };
 
   try {
+    // A submit may have committed before a crash prevented the orchestrator
+    // from updating its checkpoint. Adopt it before reopening any model session.
+    if (checkpoint.active_stage?.kind === 'creator') {
+      const saved = mostRecentPersistedDraft(
+        store,
+        request.request_id,
+        checkpoint.draft_ids,
+        `semantic-creator-${checkpoint.active_stage.id}`,
+      );
+      if (saved) {
+        latestDraft = draftService.get(saved.id);
+        checkpoint.draft_ids.push(saved.id);
+        latestReview = undefined;
+        checkpoint.active_stage = null;
+      }
+    }
+    if (checkpoint.active_stage?.kind === 'reviewer' && latestReview)
+      checkpoint.active_stage = null;
+    if (latestReview && !checkpoint.review_ids.includes(latestReview.id)) {
+      checkpoint.review_ids.push(latestReview.id);
+      if (latestReview.status === 'revision_required') {
+        const fingerprint = reviewFingerprint(latestReview, latestDraft);
+        checkpoint.review_history.push({
+          draft_id: latestDraft.id,
+          review_id: latestReview.id,
+          fingerprint,
+          repeated: checkpoint.review_history.at(-1)?.fingerprint === fingerprint,
+          issue_targets: latestReview.issues.map((issue) => ({
+            target: issue.target,
+            module_id: issue.module_id,
+            step_id: issue.step_id,
+            category: issue.category,
+          })),
+        });
+      }
+    }
     persist('planning');
-    while (checkpoint.agent_invocations < SEMANTIC_ROUTE_RECOVERY_LIMITS.total_agent_invocations) {
+    while (
+      checkpoint.agent_invocations < SEMANTIC_ROUTE_RECOVERY_LIMITS.total_agent_invocations ||
+      checkpoint.active_stage
+    ) {
       signal.throwIfAborted();
       if (!latestDraft || latestReview?.status === 'revision_required') {
-        if (checkpoint.creator_attempts >= SEMANTIC_ROUTE_RECOVERY_LIMITS.creator_attempts) break;
+        if (
+          checkpoint.creator_attempts >= SEMANTIC_ROUTE_RECOVERY_LIMITS.creator_attempts &&
+          checkpoint.active_stage?.kind !== 'creator'
+        )
+          break;
         setPhase('planning');
-        checkpoint.creator_attempts++;
-        checkpoint.agent_invocations++;
-        persist();
+        const stageAttempt = beginStage('creator', request.request_id);
         try {
           const previousReview = latestReview,
             candidate = await runCreator({
@@ -374,10 +461,12 @@ export async function runSemanticRouteGenerationService({
                     )
                   : creatorRecovery,
               services: { sourceUnitService, draftService },
+              stage_attempt: stageAttempt,
             });
           latestDraft = draftService.get(candidate.id);
           latestReview = undefined;
           checkpoint.draft_ids.push(latestDraft.id);
+          checkpoint.active_stage = null;
           creatorRecovery = undefined;
           persist('reviewing');
           emit('module', {
@@ -396,9 +485,13 @@ export async function runSemanticRouteGenerationService({
             latestDraft = draftService.get(persisted.id);
             latestReview = undefined;
             checkpoint.draft_ids.push(latestDraft.id);
+            checkpoint.active_stage = null;
             persist('reviewing');
+            signal.throwIfAborted();
             continue;
           }
+          if (stageInterrupted(error)) throw error;
+          checkpoint.active_stage = null;
           creatorRecovery = recordFailure(
             'semantic_creator',
             { request_id: request.request_id },
@@ -411,21 +504,25 @@ export async function runSemanticRouteGenerationService({
       if (latestReview?.status === 'accepted') break;
       if (
         reviewerAttempts(checkpoint, latestDraft.id) >=
-        SEMANTIC_ROUTE_RECOVERY_LIMITS.reviewer_attempts_per_draft
+          SEMANTIC_ROUTE_RECOVERY_LIMITS.reviewer_attempts_per_draft &&
+        !(
+          checkpoint.active_stage?.kind === 'reviewer' &&
+          checkpoint.active_stage.target === latestDraft.id
+        )
       )
         break;
       setPhase('reviewing');
-      incrementReviewerAttempts(checkpoint, latestDraft.id);
-      checkpoint.agent_invocations++;
-      persist();
+      const stageAttempt = beginStage('reviewer', latestDraft.id);
       try {
         const candidate = await runReviewer({
           draft: latestDraft,
           recovery_context: reviewerRecovery,
           services: { reviewService },
+          stage_attempt: stageAttempt,
         });
         latestReview = reviewService.get(candidate.draft_id);
         checkpoint.review_ids.push(latestReview.id);
+        checkpoint.active_stage = null;
         reviewerRecovery = undefined;
         if (latestReview.status === 'revision_required') {
           const fingerprint = reviewFingerprint(latestReview, latestDraft),
@@ -461,14 +558,21 @@ export async function runSemanticRouteGenerationService({
           latestReview = reviewService.get(latestDraft.id);
           if (!checkpoint.review_ids.includes(latestReview.id))
             checkpoint.review_ids.push(latestReview.id);
+          checkpoint.active_stage = null;
           persist(latestReview.status === 'accepted' ? 'publishing' : 'planning');
+          signal.throwIfAborted();
           continue;
-        } catch {}
+        } catch (savedError) {
+          if (signal.aborted) throw savedError;
+        }
+        if (stageInterrupted(error)) throw error;
+        checkpoint.active_stage = null;
         reviewerRecovery = recordFailure('semantic_reviewer', { draft_id: latestDraft.id }, error);
       }
     }
 
     if (!latestDraft) throw terminalError ?? new Error('Agent 未能生成任何可保存的语义路线草稿');
+    checkpoint.active_stage = null;
 
     setPhase('explaining');
     if (checkpoint.teaching.draft_id !== latestDraft.id) {
@@ -718,7 +822,8 @@ export async function runSemanticRouteGenerationService({
       error: safeError(cause),
       validationIssues: failure.issues,
       recoveryAttempts: checkpoint.recovery_attempts.length,
-      failureKind: 'generation',
+      failureKind:
+        cancelled || error?.code === 'ROUTE_SESSION_INTERRUPTED' ? 'external' : 'generation',
       finishedAt: Date.now(),
       updatedAt: Date.now(),
     };
